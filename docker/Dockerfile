@@ -68,9 +68,11 @@ LABEL org.opencontainers.image.title="Flarum (anatoly-lab)" \
 # pdo (+ a driver), tokenizer, zip, session. The base FrankenPHP image already
 # ships curl/dom/fileinfo/json/mbstring/openssl/tokenizer/session/phar.
 #
-# CRITICAL: this deployment runs on PostgreSQL, so install pdo_pgsql (NOT
-# pdo_mysql — the Flarum docs list pdo_mysql only because they assume MySQL).
-# Without pdo_pgsql the DB connection fails outright.
+# CRITICAL: this deployment runs on PostgreSQL, so pdo_pgsql is the driver that
+# actually carries the DB connection. We ALSO install pdo_mysql even though it is
+# never used: Flarum's `flarum install` prerequisite check hardcodes pdo_mysql as
+# "required" regardless of the chosen driver, and aborts the install without it.
+# (Known Flarum quirk for PostgreSQL installs — pdo_mysql is present-but-unused.)
 #
 # install-php-extensions is provided by the FrankenPHP base image and pulls the
 # right system libs for each extension.
@@ -80,6 +82,7 @@ LABEL org.opencontainers.image.title="Flarum (anatoly-lab)" \
 # =============================================================================
 RUN install-php-extensions \
         pdo_pgsql \
+        pdo_mysql \
         gd \
         intl \
         zip \
