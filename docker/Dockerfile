@@ -159,6 +159,16 @@ RUN composer config minimum-stability beta \
 RUN groupadd --gid 1000 flarum \
     && useradd --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin flarum \
     && chown -R 1000:1000 /app \
+    # config.php must live on the config PVC (mounted at /flarum-config) so it
+    # survives restarts AND is visible to every container. Bake the symlink into
+    # the IMAGE: an init container's symlink would only exist on that container's
+    # ephemeral /app and never reach install/migrate/web. `flarum install` writes
+    # through this symlink, landing config.php on the PVC; the symlink is dangling
+    # until then, which Flarum correctly reads as "not installed".
+    && mkdir -p /flarum-config \
+    && ln -sfn /flarum-config/config.php /app/config.php \
+    && chown -h 1000:1000 /app/config.php \
+    && chown 1000:1000 /flarum-config \
     # FrankenPHP/Caddy writes data + config under these paths at runtime.
     && mkdir -p /data/caddy /config/caddy \
     && chown -R 1000:1000 /data /config
