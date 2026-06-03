@@ -147,6 +147,8 @@ spec:
                 $tpl = str_replace("__DB_PASSWORD__", $esc(getenv("FLARUM_DB_PASSWORD")), $tpl);
                 $tpl = str_replace("__ADMIN_PASSWORD__", $esc(getenv("FLARUM_ADMIN_PASSWORD")), $tpl);
                 $tpl = str_replace("__KEYCLOAK_CLIENT_SECRET__", $esc(getenv("FLARUM_KEYCLOAK_CLIENT_SECRET") ?: ""), $tpl);
+                $tpl = str_replace("__MAIL_USERNAME__", $esc(getenv("FLARUM_MAIL_USERNAME") ?: ""), $tpl);
+                $tpl = str_replace("__MAIL_PASSWORD__", $esc(getenv("FLARUM_MAIL_PASSWORD") ?: ""), $tpl);
                 file_put_contents("/tmp/install.yml", $tpl);
               '
               php flarum install --file=/tmp/install.yml
@@ -178,6 +180,21 @@ spec:
                 secretKeyRef:
                   name: {{ default (include "flarum.secretName" .) .Values.flarum.keycloak.existingSecret }}
                   key: {{ if .Values.flarum.keycloak.existingSecret }}{{ .Values.flarum.keycloak.secretKey }}{{ else }}keycloak-client-secret{{ end }}
+            {{- end }}
+            {{- if .Values.flarum.mail.enabled }}
+            # SMTP creds come from an EXISTING in-namespace Secret (never the
+            # chart's rendered install Secret), injected into install.yml via the
+            # __MAIL_USERNAME__/__MAIL_PASSWORD__ placeholders above.
+            - name: FLARUM_MAIL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "flarum.mail.existingSecret is required when mail.enabled" .Values.flarum.mail.existingSecret }}
+                  key: {{ .Values.flarum.mail.usernameKey }}
+            - name: FLARUM_MAIL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "flarum.mail.existingSecret is required when mail.enabled" .Values.flarum.mail.existingSecret }}
+                  key: {{ .Values.flarum.mail.passwordKey }}
             {{- end }}
           volumeMounts:
             - name: install-file

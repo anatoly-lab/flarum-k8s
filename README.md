@@ -283,10 +283,65 @@ With SSO enabled, the login button hits `https://<forum-host>/auth/keycloak`.
 | `flarum.keycloak.secretKey` | Key in the existing Keycloak Secret | `keycloak-client-secret` |
 | `flarum.keycloak.authServerUrl` | Keycloak base URL, no `/auth` (required when enabled) | `""` |
 | `flarum.keycloak.realm` | Keycloak realm (required when enabled) | `""` |
+| `flarum.keycloak.ssoOnly` | SSO-only mode: seed `allow_sign_up=0` (disable local self-registration) when keycloak.enabled | `false` |
 
 > Every secret field supports inline (`password`/`clientSecret`) **or**
 > `existingSecret` + `secretKey`. With `existingSecret`, no secret value is
 > rendered into the chart manifests.
+
+#### SSO-only mode (`flarum.keycloak.ssoOnly`) — behaviour & limitations
+
+Setting `ssoOnly: true` (with `keycloak.enabled`) seeds `allow_sign_up = "0"`,
+which closes the public Sign-Up form and makes the core user-create endpoint
+admin-only. This was verified against Flarum 2.0 core source. Understand the
+two limitations before relying on it:
+
+1. **New Keycloak users cannot auto-provision.** When a brand-new user logs in
+   via Keycloak, fof/oauth routes them through Flarum core's user-create
+   endpoint, which `allow_sign_up=0` gates to admins only — and the OAuth
+   registration token does **not** bypass that gate
+   (`Api/Resource/UserResource` `Create.visible()`). There is no fof/oauth or
+   core setting to allow "register via OAuth while local sign-up is closed"
+   without a heavier, questionable extension (deliberately not added). To
+   onboard new members, either pre-create their Flarum accounts (matching the
+   Keycloak email) or temporarily flip `ssoOnly: false`.
+2. **The local password login form is not hidden.** Core has no setting to
+   remove it. Local admin login therefore remains as an intentional fallback —
+   and because **existing** users (login-provider match or email match) are
+   logged in directly without touching the gated create endpoint, the
+   install-time admin (whose email matches its Keycloak account) auto-links on
+   first SSO login and stays usable.
+
+### Email / SMTP parameters
+
+| Name | Description | Value |
+| ---- | ----------- | ----- |
+| `flarum.mail.enabled` | Seed SMTP mail settings at install | `false` |
+| `flarum.mail.driver` | Mail driver | `smtp` |
+| `flarum.mail.host` | SMTP host (required when enabled) | `""` |
+| `flarum.mail.port` | SMTP port (587 STARTTLS / 465 SSL / 25 plain) | `587` |
+| `flarum.mail.encryption` | `tls` (STARTTLS), `ssl` (implicit), `""` (none) | `tls` |
+| `flarum.mail.from` | Sender From address (required when enabled) | `""` |
+| `flarum.mail.existingSecret` | Existing in-namespace Secret with SMTP creds | `smtp-credentials` |
+| `flarum.mail.usernameKey` | Key in that Secret for the SMTP username | `username` |
+| `flarum.mail.passwordKey` | Key in that Secret for the SMTP password | `password` |
+
+> **Seeded at install time only.** Like the Keycloak block, mail and `ssoOnly`
+> settings are written by the guarded one-shot `install` step (when the DB has
+> no `settings.version` row). Flipping `mail.enabled`/`ssoOnly`/changing SMTP
+> host on an **already-installed** forum is a no-op — change those in the admin
+> UI, or re-seed via a direct `settings` upsert (`allow_sign_up` → `"0"`,
+> `mail_*`). The install-file values win over core defaults
+> (`WriteSettings`: `$custom + $defaults`, left-precedence).
+>
+> SMTP credentials are **existing-secret-only** (no inline fallback): create a
+> Secret in the release namespace (default name `smtp-credentials`) with
+> `username`/`password` keys. The chart injects them into `install.yml` at
+> runtime via placeholders — they are never rendered into a chart Secret or a
+> ConfigMap. Flarum 2.0 has no separate from-name setting; the sender display
+> name is the `forum_title` (set it via `flarum.extraSettings.forum_title`).
+> Verified core keys: `mail_driver`, `mail_host`, `mail_port`,
+> `mail_encryption`, `mail_username`, `mail_password`, `mail_from`.
 
 ### Init container parameters
 

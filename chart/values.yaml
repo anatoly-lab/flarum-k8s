@@ -89,6 +89,60 @@ flarum:
     # Keycloak base URL, NO trailing /auth (KC 17+). e.g. https://kc.example.com
     authServerUrl: ""
     realm: ""
+    # -- SSO-only mode --
+    # When true (and keycloak.enabled), seed `allow_sign_up=0` so LOCAL self-
+    # registration is disabled: the public Sign-Up form is closed and the core
+    # user-create endpoint becomes admin-only.
+    #
+    # LIMITATIONS (verified against Flarum 2.0 core source, see README):
+    #   1. New Keycloak users CANNOT auto-provision. fof/oauth routes a brand-new
+    #      user through core's user-create endpoint, which `allow_sign_up=0`
+    #      gates to admins only -- and the OAuth registration token does NOT
+    #      bypass that gate. There is no fof/oauth or core setting to allow
+    #      "register via OAuth while local sign-up is closed" without a heavier,
+    #      questionable extension (deliberately NOT added). So pre-create the
+    #      accounts in Flarum (matching emails) or flip ssoOnly off to onboard.
+    #   2. EXISTING users still log in via SSO: fof/oauth's login-provider match
+    #      and email-match auto-link paths log the user in DIRECTLY, never
+    #      touching the gated create endpoint. This is how the install-time admin
+    #      (whose email matches its Keycloak account) auto-links on first SSO
+    #      login -- so the admin stays usable.
+    #   3. The LOCAL password login form is NOT hidden -- core has no setting to
+    #      remove it, and doing so cleanly would need an extra extension. Local
+    #      admin login therefore remains as an intentional fallback.
+    ssoOnly: false
+
+  # -- Outgoing email (SMTP) --
+  # Flarum stores mail config as rows in the DB `settings` table; this chart
+  # seeds them into the install file's `settings` map. The non-secret fields
+  # below are written verbatim; the SMTP username + password come from an
+  # EXISTING in-namespace Secret (NOT the chart's rendered install Secret) and
+  # are injected into install.yml at runtime via the same placeholder mechanism
+  # used for the db/admin/keycloak secrets -- they never touch git or a ConfigMap.
+  #
+  # Verified Flarum 2.0 core mail setting keys: mail_driver, mail_host,
+  # mail_port, mail_encryption, mail_username, mail_password, mail_from. There is
+  # NO from-name setting -- the sender display name is the forum_title
+  # (set it via extraSettings.forum_title if you want a specific name).
+  mail:
+    enabled: false
+    # Mail driver. `smtp` is the only driver this block wires up.
+    driver: smtp
+    # SMTP server host, e.g. mail.smtp2go.com
+    host: ""
+    # SMTP port. 587 = STARTTLS (encryption: tls), 465 = implicit TLS
+    # (encryption: ssl), 25 = plain (encryption: "").
+    port: 587
+    # Connection encryption. "tls" = STARTTLS, "ssl" = implicit TLS, "" = none.
+    encryption: tls
+    # Envelope/sender From address, e.g. forum@example.com
+    from: ""
+    # SMTP credentials live in an EXISTING Secret in the release namespace
+    # (default: smtp-credentials with keys username/password). Required when
+    # mail.enabled -- there is intentionally no inline fallback for SMTP creds.
+    existingSecret: smtp-credentials
+    usernameKey: username
+    passwordKey: password
 
   # -- Extensions enabled at install time --
   # Flarum extension IDs (NOT composer package names), comma-joined into the
