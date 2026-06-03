@@ -1,0 +1,78 @@
+===========================================================================
+  Flarum has been deployed!
+===========================================================================
+
+{{- if not .Values.flarum.url }}
+
+  WARNING: flarum.url is not set!
+  The deployment will fail. Set it to your forum's public base URL
+  (e.g. https://forum.example.com).
+
+{{- end }}
+
+{{- if not .Values.flarum.database.host }}
+
+  WARNING: flarum.database.host is not set!
+  The deployment will fail. Set it to your external PostgreSQL host.
+
+{{- end }}
+
+{{- if not .Values.flarum.admin.email }}
+
+  WARNING: flarum.admin.email is not set!
+  Install will fail -- the admin account needs an email.
+
+{{- end }}
+
+  Base URL:      {{ .Values.flarum.url | default "<NOT SET>" }}
+  Database host: {{ .Values.flarum.database.host | default "<NOT SET>" }}:{{ .Values.flarum.database.port }}/{{ .Values.flarum.database.name }}
+  Keycloak SSO:  {{ if .Values.flarum.keycloak.enabled }}enabled (realm {{ .Values.flarum.keycloak.realm }}){{ else }}disabled{{ end }}
+
+  Architecture:
+    web (FrankenPHP classic mode, port 8080) behind one Service (port 80)
+    init flow: link-config -> {{ if .Values.initContainers.waitForPostgres.enabled }}wait-for-postgres -> {{ end }}install (guarded) -> migrate -> assets:publish
+
+  FIRST BOOT NOTES:
+  -----------------
+  * The `install` init container runs `php flarum install` ONCE (guarded on the
+    DB settings.version row). It writes config.php onto the config PVC, seeds
+    settings (incl. Keycloak SSO), creates the admin user, and enables the
+    listed extensions.
+  * `migrate` and `assets:publish` run on EVERY boot (idempotent). assets:publish
+    is mandatory -- the assets PVC shadows the baked assets, so without it the
+    forum renders with no CSS.
+
+  Watch the init flow:
+
+      kubectl logs deploy/{{ include "flarum.fullname" . }} -c install -n {{ .Release.Namespace }}
+      kubectl logs deploy/{{ include "flarum.fullname" . }} -c migrate -n {{ .Release.Namespace }}
+      kubectl logs deploy/{{ include "flarum.fullname" . }} -c assets-publish -n {{ .Release.Namespace }}
+
+  Watch the web server:
+
+      kubectl logs -f deploy/{{ include "flarum.fullname" . }} -c web -n {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+
+  Access your forum at:
+  {{- range .Values.ingress.hosts }}
+    http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+  {{- end }}
+
+{{- else }}
+
+  To access Flarum, run:
+
+    kubectl port-forward svc/{{ include "flarum.fullname" . }} 8080:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+
+  Then open http://localhost:8080 in your browser.
+
+{{- end }}
+
+{{- if .Values.flarum.keycloak.enabled }}
+
+  Keycloak login: {{ .Values.flarum.url }}/auth/keycloak
+  Register a confidential client in realm "{{ .Values.flarum.keycloak.realm }}"
+  with redirect URI: {{ .Values.flarum.url }}/auth/keycloak
+
+{{- end }}

@@ -1,0 +1,19 @@
+# Unlike discourse-k8s (which excludes everything, since nothing is COPY'd in),
+# this build MUST copy the local Keycloak provider package into the image as a
+# Composer `path` repository. So we keep `extensions/` and exclude only noise.
+
+# Ignore everything by default...
+*
+
+# ...then re-include exactly what the build context needs.
+!Dockerfile
+!extensions/
+
+# Strip dev/build noise from the provider package if it ever appears locally
+# (e.g. from a local `composer install` while developing the extension).
+extensions/**/vendor/
+extensions/**/composer.lock
+extensions/**/node_modules/
+extensions/**/.git/
+extensions/**/js/dist/
+extensions/**/*.log

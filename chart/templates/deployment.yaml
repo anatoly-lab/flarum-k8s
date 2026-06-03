@@ -1,0 +1,321 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flarum.fullname" . }}
+  labels:
+    {{- include "flarum.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  strategy:
+    # RWO PVCs (storage/assets/config) can attach to only one pod at a time, so
+    # we must fully tear down the old pod before the new one starts.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "flarum.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "flarum.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "flarum.serviceAccountName" . }}
+      # Flarum never calls the Kubernetes API; don't auto-mount the SA token.
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      restartPolicy: {{ .Values.restartPolicy }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
+      initContainers:
+        # ---- Make config.php durable (symlink onto the config PVC) ----
+        # Flarum reads /app/config.php on the ephemeral rootfs. We keep the real
+        # file on the config PVC (mounted at {{ include "flarum.configDir" . }})
+        # and point /app/config.php at it so the file survives restarts and the
+        # web pod never boots into the installer. `install` writes through this
+        # symlink, landing config.php on the PVC. Idempotent every boot.
+        - name: link-config
+          image: {{ include "flarum.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              CFG_DIR="{{ include "flarum.configDir" . }}"
+              # Replace /app/config.php with a symlink to the PVC-backed file.
+              # -f handles a pre-existing regular file (e.g. a baked stub) or an
+              # already-correct symlink.
+              ln -sfn "${CFG_DIR}/config.php" /app/config.php
+              echo "Linked /app/config.php -> ${CFG_DIR}/config.php"
+          volumeMounts:
+            - name: config
+              mountPath: {{ include "flarum.configDir" . }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+        {{- if .Values.initContainers.waitForPostgres.enabled }}
+        # ---- Wait for PostgreSQL to be reachable ----
+        - name: wait-for-postgres
+          image: "{{ .Values.initContainers.waitForPostgres.image.repository }}:{{ .Values.initContainers.waitForPostgres.image.tag }}"
+          imagePullPolicy: {{ .Values.initContainers.waitForPostgres.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for PostgreSQL at {{ .Values.flarum.database.host }}:{{ .Values.flarum.database.port }}..."
+              until nc -z "{{ .Values.flarum.database.host }}" "{{ .Values.flarum.database.port }}"; do
+                echo "PostgreSQL not ready, retrying in 2s..."
+                sleep 2
+              done
+              echo "PostgreSQL is reachable."
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+
+        # ---- Install (guarded, runs once) ----
+        # `flarum install` has NO built-in "already installed" guard, and
+        # config.php is NOT a reliable sentinel (it can be regenerated). So we
+        # guard on DB state: if the `settings` table already holds the `version`
+        # row (always written by install), we skip. Otherwise we render the
+        # install file (substituting secrets from env) and run install. Once
+        # install succeeds, config.php lands on the config PVC (via the symlink)
+        # and the DB has the version row, so subsequent boots skip this step.
+        - name: install
+          image: {{ include "flarum.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Guard: is Flarum already installed? Check the settings.version
+              # row via PDO (pdo_pgsql is in the image). Exit code 10 = installed.
+              set +e
+              php -r '
+                $dsn = sprintf("pgsql:host=%s;port=%s;dbname=%s",
+                  getenv("FLARUM_DB_HOST"), getenv("FLARUM_DB_PORT"), getenv("FLARUM_DB_NAME"));
+                try {
+                  $pdo = new PDO($dsn, getenv("FLARUM_DB_USER"), getenv("FLARUM_DB_PASSWORD"),
+                    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+                  $prefix = getenv("FLARUM_DB_PREFIX");
+                  $stmt = $pdo->query("SELECT value FROM " . $prefix . "settings WHERE key = " . "\x27version\x27");
+                  if ($stmt && $stmt->fetch()) { exit(10); }
+                  exit(0);
+                } catch (Throwable $e) {
+                  // Table/DB not ready yet -> treat as not installed.
+                  exit(0);
+                }
+              '
+              GUARD=$?
+              set -e
+              if [ "$GUARD" -eq 10 ]; then
+                echo "Flarum already installed (settings.version present); skipping install."
+                exit 0
+              fi
+              echo "Flarum not installed; rendering install file and installing..."
+              # Inject secrets into the install file at runtime. Done in PHP with
+              # a literal str_replace (NOT sed) so passwords containing /, &, |
+              # or other regex-special characters are substituted verbatim. The
+              # template already wraps each placeholder in YAML double quotes and
+              # we escape \ and " in the value, so a secret with quotes/backslashes
+              # still produces valid YAML.
+              php -r '
+                $tpl = file_get_contents("/config/install.yml");
+                $esc = function ($v) { return str_replace(["\\", "\""], ["\\\\", "\\\""], (string) $v); };
+                $tpl = str_replace("__DB_PASSWORD__", $esc(getenv("FLARUM_DB_PASSWORD")), $tpl);
+                $tpl = str_replace("__ADMIN_PASSWORD__", $esc(getenv("FLARUM_ADMIN_PASSWORD")), $tpl);
+                $tpl = str_replace("__KEYCLOAK_CLIENT_SECRET__", $esc(getenv("FLARUM_KEYCLOAK_CLIENT_SECRET") ?: ""), $tpl);
+                file_put_contents("/tmp/install.yml", $tpl);
+              '
+              php flarum install --file=/tmp/install.yml
+              echo "Install complete."
+          env:
+            - name: FLARUM_DB_HOST
+              value: {{ .Values.flarum.database.host | quote }}
+            - name: FLARUM_DB_PORT
+              value: {{ .Values.flarum.database.port | quote }}
+            - name: FLARUM_DB_NAME
+              value: {{ .Values.flarum.database.name | quote }}
+            - name: FLARUM_DB_USER
+              value: {{ .Values.flarum.database.username | quote }}
+            - name: FLARUM_DB_PREFIX
+              value: {{ .Values.flarum.database.prefix | quote }}
+            - name: FLARUM_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "flarum.secretName" .) .Values.flarum.database.existingSecret }}
+                  key: {{ if .Values.flarum.database.existingSecret }}{{ .Values.flarum.database.secretKey }}{{ else }}db-password{{ end }}
+            - name: FLARUM_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "flarum.secretName" .) .Values.flarum.admin.existingSecret }}
+                  key: {{ if .Values.flarum.admin.existingSecret }}{{ .Values.flarum.admin.secretKey }}{{ else }}admin-password{{ end }}
+            {{- if .Values.flarum.keycloak.enabled }}
+            - name: FLARUM_KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "flarum.secretName" .) .Values.flarum.keycloak.existingSecret }}
+                  key: {{ if .Values.flarum.keycloak.existingSecret }}{{ .Values.flarum.keycloak.secretKey }}{{ else }}keycloak-client-secret{{ end }}
+            {{- end }}
+          volumeMounts:
+            - name: install-file
+              mountPath: /config
+              readOnly: true
+            - name: config
+              mountPath: {{ include "flarum.configDir" . }}
+            - name: storage
+              mountPath: /app/storage
+            - name: assets
+              mountPath: /app/public/assets
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+        # ---- Migrate (idempotent, every boot) ----
+        # Safe to run on every boot; catches new core/extension migrations on
+        # image upgrades. Only meaningful after install has written config.php.
+        - name: migrate
+          image: {{ include "flarum.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["php", "flarum", "migrate"]
+          volumeMounts:
+            - name: config
+              mountPath: {{ include "flarum.configDir" . }}
+            - name: storage
+              mountPath: /app/storage
+            - name: assets
+              mountPath: /app/public/assets
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+        # ---- Publish assets (idempotent, MANDATORY every boot) ----
+        # The assets PVC starts empty and shadows the baked assets, so without
+        # this the forum renders with no CSS. Re-publishing is idempotent.
+        - name: assets-publish
+          image: {{ include "flarum.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["php", "flarum", "assets:publish"]
+          volumeMounts:
+            - name: config
+              mountPath: {{ include "flarum.configDir" . }}
+            - name: storage
+              mountPath: /app/storage
+            - name: assets
+              mountPath: /app/public/assets
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+      containers:
+        # ---- FrankenPHP web server (classic mode, port 8080) ----
+        # No `command`: use the image's DEFAULT command (frankenphp run). TLS is
+        # terminated at the ingress; this speaks plain HTTP.
+        - name: web
+          image: {{ include "flarum.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: {{ include "flarum.configDir" . }}
+            - name: storage
+              mountPath: /app/storage
+            - name: assets
+              mountPath: /app/public/assets
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+      volumes:
+        - name: install-file
+          secret:
+            secretName: {{ include "flarum.secretName" . }}
+            items:
+              - key: install.yml
+                path: install.yml
+        - name: config
+          persistentVolumeClaim:
+            claimName: {{ include "flarum.configPvcName" . }}
+        - name: storage
+          persistentVolumeClaim:
+            claimName: {{ include "flarum.storagePvcName" . }}
+        - name: assets
+          persistentVolumeClaim:
+            claimName: {{ include "flarum.assetsPvcName" . }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

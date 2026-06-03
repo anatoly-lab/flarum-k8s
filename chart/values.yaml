@@ -1,0 +1,278 @@
+# =============================================================================
+# Flarum Helm Chart -- values.yaml
+# =============================================================================
+# Deploys Flarum 2.0 on Kubernetes (Talos) using a single custom FrankenPHP
+# image (classic mode, port 8080) against an EXTERNAL PostgreSQL database, with
+# Keycloak SSO via FriendsOfFlarum/oauth + a baked-in custom Keycloak provider.
+#
+# One image serves both the web server (default command) and the one-off CLI
+# tasks (install / migrate / assets:publish), invoked as init containers via a
+# command override. TLS terminates at the ingress -- the container speaks plain
+# HTTP on 8080.
+#
+# See README.md for the full architecture and the init/guard flow.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Flarum container image
+# ---------------------------------------------------------------------------
+# The image bakes Flarum + fof/oauth + the custom Keycloak provider at build
+# time. image.tag defaults to Chart.appVersion when left empty.
+image:
+  repository: ghcr.io/anatoly-lab/flarum-k8s
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Flarum configuration
+# ---------------------------------------------------------------------------
+flarum:
+  # REQUIRED -- the public base URL of the forum, scheme included
+  # (e.g. https://forum.example.com). Written to config.php as `url` and seeded
+  # into the install file's `baseUrl`. Keycloak's redirect URI is
+  # <url>/auth/keycloak.
+  url: ""
+
+  # Flarum debug mode. Keep false in production -- when true Flarum does NOT
+  # cache the fof-oauth provider payload, which is convenient while wiring up
+  # SSO but leaks stack traces.
+  debug: false
+
+  # -- Admin account (created once, at install time) --
+  admin:
+    username: "admin"
+    email: ""
+    # Inline password. Ignored if existingSecret is set. Goes into the rendered
+    # install.yml Secret -- never set this in a git-committed values file; use
+    # existingSecret (Vault/ESO) instead.
+    password: ""
+    # Use an existing Secret for the admin password.
+    existingSecret: ""
+    secretKey: admin-password
+
+  # -- PostgreSQL (external -- NOT deployed by this chart) --
+  # Reuse-existing-Postgres model: point this at a CNPG cluster, a managed PG,
+  # etc. The database must already exist and the user must own it.
+  database:
+    host: ""
+    port: 5432
+    name: flarum
+    username: flarum
+    # search_path / schema. Flarum's install file takes search_path; public is
+    # the standard schema.
+    searchPath: public
+    # Table name prefix (Flarum's `prefix`). Empty = no prefix.
+    prefix: ""
+    # Inline password. Ignored if existingSecret is set.
+    password: ""
+    # Use an existing Secret for the database password.
+    existingSecret: ""
+    secretKey: db-password
+
+  # -- Keycloak SSO (FriendsOfFlarum/oauth + custom provider) --
+  # When enabled, the install file seeds the fof-oauth.keycloak.* settings rows
+  # so SSO works on first boot with no admin click-ops. The client_secret is
+  # stored PLAINTEXT in the Flarum `settings` table (a FoF property) -- it is
+  # sourced from a k8s Secret, never committed to git.
+  keycloak:
+    enabled: false
+    clientId: ""
+    # Inline client secret. Ignored if existingSecret is set.
+    clientSecret: ""
+    existingSecret: ""
+    secretKey: keycloak-client-secret
+    # Keycloak base URL, NO trailing /auth (KC 17+). e.g. https://kc.example.com
+    authServerUrl: ""
+    realm: ""
+
+  # -- Extensions enabled at install time --
+  # Flarum extension IDs (NOT composer package names), comma-joined into the
+  # install file's `extensions` key. These must already be composer-installed in
+  # the image. fof-oauth + the custom Keycloak provider are required for SSO.
+  extensions:
+    - fof-oauth
+    - anatolylab-keycloak-provider
+
+  # -- Extra settings seeded into the `settings` table at install time --
+  # Arbitrary key -> value map merged into the install file's `settings` map
+  # (on top of the keycloak.* keys the chart adds when keycloak.enabled). Use
+  # for forum_title, welcome_title, theme colors, etc. Values are strings.
+  # Example:
+  #   extraSettings:
+  #     forum_title: "My Community"
+  #     welcome_title: "Welcome!"
+  extraSettings: {}
+
+# ---------------------------------------------------------------------------
+# Init containers
+# ---------------------------------------------------------------------------
+initContainers:
+  # Optional busybox `nc` loop that blocks until PostgreSQL accepts TCP
+  # connections, so the install/migrate steps don't fail fast on a cold DB.
+  waitForPostgres:
+    enabled: true
+    image:
+      repository: busybox
+      tag: "1.37"
+      pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Persistent storage
+# ---------------------------------------------------------------------------
+# Three RWO PVCs. The image bakes the app into /app, so we must NOT mount a
+# volume over /app itself -- only over the sub-paths that hold runtime state.
+#
+# Talos has no default StorageClass -- you MUST set persistence.*.storageClass
+# (or a global default via the cluster) or the PVCs stay Pending.
+persistence:
+  # /app/storage -- logs, cache, sessions, formatter cache.
+  storage:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    existingClaim: ""
+
+  # /app/public/assets -- uploads (logos, avatars) AND published assets. This
+  # mount STARTS EMPTY and shadows the baked assets, which is exactly why
+  # `flarum assets:publish` MUST run on every boot (see the assets-publish init
+  # container) -- otherwise the forum renders with no CSS.
+  assets:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    existingClaim: ""
+
+  # config.php durability. `flarum install` writes config.php ONCE; on an
+  # ephemeral filesystem it is lost on restart and the web pod boots into the
+  # web installer. We persist it on a tiny PVC mounted at a directory and
+  # symlink /app/config.php to it (see the link-config init container and the
+  # README "config.php durability" section for why a directory mount + symlink
+  # is used instead of a subPath file mount).
+  config:
+    enabled: true
+    size: 64Mi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    existingClaim: ""
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+# Service port 80 -> container targetPort 8080 (FrankenPHP classic mode).
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Ingress
+# ---------------------------------------------------------------------------
+# TLS is terminated HERE (auto-HTTPS is disabled in the image). Point your TLS
+# secret at the ingress.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Example:
+  #   hosts:
+  #     - host: forum.example.com
+  #       paths:
+  #         - path: /
+  #           pathType: Prefix
+  hosts: []
+  # Example:
+  #   tls:
+  #     - secretName: forum-tls
+  #       hosts:
+  #         - forum.example.com
+  tls: []
+
+# ---------------------------------------------------------------------------
+# Web container resources
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Service account
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: false
+  annotations: {}
+  name: ""
+
+# ---------------------------------------------------------------------------
+# Common metadata (applied to EVERY resource this chart renders)
+# ---------------------------------------------------------------------------
+# Labels merged into the shared label set (Deployment, Service, Secret,
+# Ingress, ServiceAccount, PVCs). NOT added to the immutable selector labels,
+# so they're safe to change on an existing release.
+commonLabels: {}
+# Annotations merged into metadata.annotations of every rendered resource.
+# Per-resource annotations (e.g. the PVC's helm.sh/resource-policy) are
+# preserved, not clobbered.
+commonAnnotations: {}
+
+# ---------------------------------------------------------------------------
+# Pod scheduling
+# ---------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Assign the pod to a PriorityClass (must already exist). Empty = none required.
+priorityClassName: ""
+
+# ---------------------------------------------------------------------------
+# Extra volumes / volume mounts (escape hatch)
+# ---------------------------------------------------------------------------
+# Arbitrary extra pod volumes and the mounts attached to the web container.
+extraVolumes: []
+extraVolumeMounts: []
+
+# ---------------------------------------------------------------------------
+# Pod metadata and security (PSA "restricted" friendly)
+# ---------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  # The image runs as uid/gid 1000. fsGroup makes the RWO PVC mounts
+  # group-writable by that user. OnRootMismatch avoids re-chowning on every
+  # restart.
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+# Container-level securityContext applied to ALL containers (init + web).
+securityContext:
+  # The image's Dockerfile ends with `USER 1000:1000`; refuse to start if a
+  # future base image regresses to root.
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  # FrankenPHP/Caddy and Flarum write to /app, /app/storage, /data, /config at
+  # runtime, so the root fs must stay writable.
+  readOnlyRootFilesystem: false
+  capabilities:
+    # SERVER_NAME binds the non-privileged port 8080, so no capabilities are
+    # needed -- drop the whole default set.
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+restartPolicy: Always
+terminationGracePeriodSeconds: 30

@@ -1,0 +1,62 @@
+{{- if and .Values.persistence.storage.enabled (not .Values.persistence.storage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "flarum.storagePvcName" . }}
+  labels:
+    {{- include "flarum.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- include "flarum.commonAnnotations" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.storage.accessModes | nindent 4 }}
+  {{- if .Values.persistence.storage.storageClass }}
+  storageClassName: {{ .Values.persistence.storage.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.storage.size }}
+{{- end }}
+---
+{{- if and .Values.persistence.assets.enabled (not .Values.persistence.assets.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "flarum.assetsPvcName" . }}
+  labels:
+    {{- include "flarum.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- include "flarum.commonAnnotations" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.assets.accessModes | nindent 4 }}
+  {{- if .Values.persistence.assets.storageClass }}
+  storageClassName: {{ .Values.persistence.assets.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.assets.size }}
+{{- end }}
+---
+{{- if and .Values.persistence.config.enabled (not .Values.persistence.config.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "flarum.configPvcName" . }}
+  labels:
+    {{- include "flarum.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- include "flarum.commonAnnotations" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.config.accessModes | nindent 4 }}
+  {{- if .Values.persistence.config.storageClass }}
+  storageClassName: {{ .Values.persistence.config.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.config.size }}
+{{- end }}

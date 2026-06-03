@@ -1,0 +1,35 @@
+{
+    "name": "anatolylab/flarum-keycloak-provider",
+    "description": "Keycloak OIDC provider for FriendsOfFlarum OAuth (Flarum 2.0)",
+    "type": "flarum-extension",
+    "license": "MIT",
+    "version": "1.0.0",
+    "keywords": [
+        "flarum",
+        "keycloak",
+        "oauth",
+        "oidc",
+        "sso"
+    ],
+    "require": {
+        "flarum/core": "^2.0",
+        "fof/oauth": "^2.0@beta",
+        "stevenmaguire/oauth2-keycloak": "^6.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "AnatolyLab\\FlarumKeycloak\\": "src/"
+        }
+    },
+    "extra": {
+        "flarum-extension": {
+            "title": "Keycloak OIDC (FoF OAuth)",
+            "category": "feature",
+            "icon": {
+                "name": "fas fa-key",
+                "backgroundColor": "#1f8acb",
+                "color": "#fff"
+            }
+        }
+    }
+}

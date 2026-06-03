@@ -1,0 +1,24 @@
+apiVersion: v2
+name: flarum
+description: A Helm chart for deploying Flarum 2.0 forum on Kubernetes (Talos) with Keycloak SSO
+type: application
+version: 0.1.0
+appVersion: "2.0.0-rc.2"
+home: https://github.com/anatoly-lab/flarum-k8s
+sources:
+  - https://github.com/anatoly-lab/flarum-k8s
+  - https://flarum.org
+maintainers:
+  - name: Anatoly
+    url: https://github.com/anatoly314
+keywords:
+  - flarum
+  - forum
+  - community
+  - discussion
+  - keycloak
+  - oidc
+  - sso
+  - kubernetes
+annotations:
+  licenses: MIT
