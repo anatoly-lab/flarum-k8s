@@ -174,6 +174,23 @@ RUN groupadd --gid 1000 flarum \
     && chown -R 1000:1000 /data /config
 
 # =============================================================================
+# Strip file capabilities from the frankenphp binary
+# =============================================================================
+# The FrankenPHP base image sets cap_net_bind_service on /usr/local/bin/frankenphp
+# so it can bind :80/:443 as non-root. We bind the unprivileged :8080, so we don't
+# need it — and crucially, a binary carrying file capabilities CANNOT be exec'd
+# when the pod sets allowPrivilegeEscalation=false (kernel no_new_privs), failing
+# with "exec: frankenphp: Operation not permitted". Strip the capability so the
+# image runs under a PSA-restricted / runAsNonRoot security context.
+# =============================================================================
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libcap2-bin \
+    && (setcap -r /usr/local/bin/frankenphp 2>/dev/null || true) \
+    && apt-get purge -y libcap2-bin \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
 # Runtime configuration
 # =============================================================================
 # SERVER_NAME=:8080  — port-only (no hostname). This (a) binds the non-priv
