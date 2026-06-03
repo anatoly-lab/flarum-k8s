@@ -110,6 +110,14 @@ spec:
             - -c
             - |
               set -e
+              # The storage PVC mounts over /app/storage and starts EMPTY, shadowing
+              # the storage skeleton baked into the image. Recreate the directories
+              # Flarum requires (sessions/cache/etc.) on the volume. Idempotent;
+              # runs every boot (before the install guard) so they always exist.
+              mkdir -p /app/storage/sessions /app/storage/cache \
+                       /app/storage/formatter /app/storage/less \
+                       /app/storage/locale /app/storage/tmp \
+                       /app/storage/views /app/storage/logs
               # Guard: is Flarum already installed? Check the settings.version
               # row via PDO (pdo_pgsql is in the image). Exit code 10 = installed.
               set +e
