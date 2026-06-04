@@ -53,6 +53,9 @@ ARG BASE_IMAGE
 ARG FLARUM_VERSION=^2.0.0
 # 2.0-compatible fof/oauth is a beta pre-release.
 ARG FOF_OAUTH_VERSION=^2.0@beta
+# fof/upload handles user-uploaded images/attachments; its S3 adapter lets them
+# live in S3-compatible storage (MinIO/R2/B2) served via a CDN URL. 2.0 is beta.
+ARG FOF_UPLOAD_VERSION=^2.0@beta
 
 LABEL org.opencontainers.image.title="Flarum (anatoly-lab)" \
       org.opencontainers.image.description="Flarum 2.0 on PostgreSQL with Keycloak SSO (FoF OAuth + custom Keycloak provider), baked at build time for Kubernetes" \
@@ -133,12 +136,18 @@ COPY extensions/flarum-keycloak-provider /opt/flarum-extensions/flarum-keycloak-
 # explicit "version", so requiring it by name resolves cleanly; it pulls in
 # fof/oauth + stevenmaguire/oauth2-keycloak transitively, but we also require
 # fof/oauth explicitly to pin its constraint.
+#
+# league/flysystem-aws-s3-v3 is required EXPLICITLY: it is only a require-dev of
+# fof/upload, so a --no-dev image would omit it and fof/upload's S3 adapter would
+# fail at runtime. Requiring it here bakes the S3 driver into the image.
 RUN composer config minimum-stability beta \
     && composer config prefer-stable true \
     && composer config repositories.keycloak path /opt/flarum-extensions/flarum-keycloak-provider \
     && composer require \
         "fof/oauth:${FOF_OAUTH_VERSION}" \
         "anatolylab/flarum-keycloak-provider:*" \
+        "fof/upload:${FOF_UPLOAD_VERSION}" \
+        "league/flysystem-aws-s3-v3:^3.0" \
         --update-no-dev --optimize-autoloader \
     && composer clear-cache
 
