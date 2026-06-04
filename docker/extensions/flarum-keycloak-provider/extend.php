@@ -10,8 +10,11 @@
  */
 
 use AnatolyLab\FlarumKeycloak\KeycloakProvider;
+use Flarum\Extend\Locales;
 use FoF\OAuth\Extend\RegisterProvider;
 
 return [
     new RegisterProvider(KeycloakProvider::class),
+    // Provides the SSO button label (fof-oauth.forum.log_in.with_keycloak_button).
+    new Locales(__DIR__ . '/locale'),
 ];

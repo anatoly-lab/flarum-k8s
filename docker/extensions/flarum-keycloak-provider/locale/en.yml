@@ -1,0 +1,8 @@
+fof-oauth:
+  forum:
+    log_in:
+      # fof/oauth builds the button label key as `with_{name}_button` where
+      # {name} is this provider's name() ("keycloak"). Built-in providers alias
+      # this to `with_button` ("Log In with {provider}"); we set a literal label
+      # so it renders cleanly without depending on {provider} resolution.
+      with_keycloak_button: Log In with Keycloak
