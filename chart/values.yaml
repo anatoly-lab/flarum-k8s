@@ -144,10 +144,77 @@ flarum:
     usernameKey: username
     passwordKey: password
 
-  # -- Extensions enabled at install time --
-  # Flarum extension IDs (NOT composer package names), comma-joined into the
-  # install file's `extensions` key. These must already be composer-installed in
-  # the image. fof-oauth + the custom Keycloak provider are required for SSO.
+  # -- fof/upload S3 / CDN storage for user uploads (attachments) --
+  # Routes user-uploaded images/attachments to S3-compatible object storage
+  # (MinIO now; Cloudflare R2 / Backblaze B2 later -- switch by endpoint+creds+
+  # bucket only) served via an optional CDN URL. Default OFF.
+  #
+  # HOW IT WIRES (verified against FriendsOfFlarum/upload 2.x source):
+  #   - When enabled, the chart sets the FOF_UPLOAD_AWS_S3_* env vars on the WEB
+  #     container. fof/upload's Driver/Config::shouldUseEnv() short-circuits to
+  #     ENV mode when bucket+region (+ key/secret OR useIam) are present, so the
+  #     S3 client is built entirely from env -- no admin click-ops for creds.
+  #   - Env mode supplies S3 CONFIG/CREDENTIALS ONLY. It does NOT, by itself,
+  #     route uploads to S3: fof/upload picks the adapter PER MIME TYPE via the
+  #     `fof-upload.mimeTypes` settings row. The chart SEEDS that row (images ->
+  #     `aws-s3` adapter) at INSTALL time. On an ALREADY-installed forum, flipping
+  #     this on enables the extension (via the enable-extensions reconcile) but
+  #     does NOT seed mimeTypes -- set the upload method once in the admin UI.
+  #   - `fof-upload` is auto-added to flarum.extensions (so it gets enabled).
+  #   - ACL is left UNSET by default (empty) -> no x-amz-acl header, which is
+  #     required for Cloudflare R2 (R2 rejects ACLs). MinIO needs pathStyle=true.
+  #
+  # The access key + secret come from a k8s Secret via secretKeyRef (NEVER git),
+  # like the other credentials. Non-secret fields below render as plain env.
+  upload:
+    enabled: false
+    # S3 endpoint, e.g.
+    #   MinIO (in-cluster): http://minio.development.svc.cluster.local:9000
+    #   R2:  https://<account>.r2.cloudflarestorage.com
+    #   B2:  https://s3.<region>.backblazeb2.com
+    endpoint: ""
+    # Region. R2 = "auto"; MinIO = any (e.g. us-east-1); B2 = match endpoint.
+    region: ""
+    # Target bucket (must already exist).
+    bucket: ""
+    # Path-style addressing. MinIO REQUIRES true; R2/B2 virtual-host can use false.
+    pathStyle: true
+    # Object ACL. Leave EMPTY for R2 (it rejects ACLs). Only emitted when set.
+    acl: ""
+    # Public/CDN base URL used to SERVE uploads (R2 custom domain, B2+Cloudflare,
+    # or a public MinIO ingress). Maps to FOF_UPLOAD_AWS_S3_CUSTOM_URL (highest
+    # precedence in fof/upload's URL resolution). Only emitted when set.
+    cdnUrl: ""
+    # S3 credentials. Sourced from an EXISTING Secret in the release namespace
+    # (Vault/ESO), never inlined into git. Required when upload.enabled.
+    existingSecret: ""
+    accessKeyKey: access-key-id
+    secretKeyKey: secret-access-key
+
+  # -- Extensions enabled (install-time AND every-boot reconcile) --
+  # Flarum extension IDs (NOT composer package names). These must already be
+  # composer-installed in the image. fof-oauth + the custom Keycloak provider are
+  # required for SSO.
+  #
+  # This list is used in TWO places:
+  #   1. Fresh install: comma-joined into the install file's `extensions` key, so
+  #      a brand-new forum comes up with exactly these enabled.
+  #   2. Every boot: the `enable-extensions` reconcile init container UNIONs this
+  #      list into the core `extensions_enabled` settings row (a JSON array of
+  #      extension IDs). This is what makes "add an extension to the image + to
+  #      this list -> recreate the pod -> extension enabled" work GitOps-style,
+  #      even though the install step is guarded (runs once).
+  #
+  # SEMANTICS -- ADDITIVE / UNION ONLY:
+  #   - Adding an ID here enables it on the next boot (idempotent: no-op if all
+  #     desired are already enabled).
+  #   - REMOVING an ID here does NOT disable it. The reconcile never removes IDs
+  #     from `extensions_enabled`. This is deliberate: auto-disabling on a values
+  #     edit could disable fof-oauth and lock everyone out of SSO. To DISABLE an
+  #     extension, do it in the admin UI (or delete the row manually).
+  #
+  # When flarum.upload.enabled, `fof-upload` is appended to this list
+  # automatically (see flarum.upload) so it is enabled alongside its env wiring.
   extensions:
     - fof-oauth
     - anatolylab-keycloak-provider

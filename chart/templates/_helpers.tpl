@@ -145,6 +145,30 @@ PVC name for config (durable config.php directory).
 {{- end }}
 
 {{/*
+Desired enabled-extension IDs (comma-separated string).
+
+The SINGLE source of truth for "which extensions should be enabled", consumed
+by BOTH:
+  - the install file's `extensions` key (fresh installs), and
+  - the enable-extensions reconcile init container's DESIRED_EXTENSIONS env
+    (every-boot additive reconcile on already-installed forums).
+Using one helper guarantees the fresh-install set and the reconcile set never
+diverge.
+
+It is .Values.flarum.extensions PLUS `fof-upload` when upload.enabled (the
+fof/upload extension must be enabled for the S3 env wiring to do anything).
+*/}}
+{{- define "flarum.desiredExtensions" -}}
+{{- $exts := .Values.flarum.extensions | default (list) -}}
+{{- if .Values.flarum.upload.enabled -}}
+{{- if not (has "fof-upload" $exts) -}}
+{{- $exts = append $exts "fof-upload" -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $exts -}}
+{{- end }}
+
+{{/*
 Directory inside the container where the config PVC is mounted. Flarum reads
 /app/config.php; we keep config.php on a PVC mounted at this directory and
 symlink /app/config.php -> {dir}/config.php at boot (see the link-config init

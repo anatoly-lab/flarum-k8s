@@ -2,7 +2,7 @@ apiVersion: v2
 name: flarum
 description: A Helm chart for deploying Flarum 2.0 forum on Kubernetes (Talos) with Keycloak SSO
 type: application
-version: 0.4.0
+version: 0.5.0
 appVersion: "2.0.0-rc.2"
 home: https://github.com/anatoly-lab/flarum-k8s
 sources:

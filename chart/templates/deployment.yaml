@@ -219,6 +219,136 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 
+        # ---- Enable extensions (additive reconcile, every boot) ----
+        # WHY: the `install` step is guarded (runs once), so adding a new
+        # extension to the image + the desired list does NOT enable it on an
+        # already-installed forum. This container closes that gap GitOps-style:
+        # "add extension to values -> recreate pod -> extension enabled".
+        #
+        # WHAT IT DOES: reads the core `extensions_enabled` settings row
+        # (verified against Flarum 2.x ExtensionManager: a JSON-encoded array of
+        # extension ID strings, e.g. ["fof-oauth","fof-upload"]), UNIONs it with
+        # the DESIRED_EXTENSIONS list, and UPSERTs it back ONLY if it changed.
+        #   - ADDITIVE/UNION ONLY: never removes IDs. Removing an ID from values
+        #     does NOT disable it (avoids accidentally disabling SSO and locking
+        #     everyone out). Disable must be done via the admin UI.
+        #   - Idempotent: no-op when all desired IDs are already enabled.
+        #   - Safe pre-install: if the settings table/row is missing (forum not
+        #     yet installed, or a brand-new install on this same boot), it exits
+        #     cleanly without writing -- the guarded `install` above already
+        #     seeded `extensions_enabled` from the same desired list on a fresh
+        #     install, so there is nothing to reconcile.
+        #
+        # WHY set-row + the existing migrate + assets-publish == a full enable:
+        # this mirrors Flarum core's install step EnableBundledExtensions::run()
+        # (and ExtensionManager::enable()) exactly -- per extension it runs
+        # migrate() + copyAssetsTo() and then sets `extensions_enabled`. We do the
+        # SAME three operations, just split across init containers:
+        #   this container -> sets extensions_enabled
+        #   migrate (next) -> runs the newly-enabled extension's migrations
+        #   assets-publish -> publishes its JS/CSS
+        # Ordering is correct: we write the row BEFORE `migrate`, and a fresh
+        # `php flarum` CLI process reads settings straight from the DB (core wraps
+        # DatabaseSettingsRepository only in an in-memory MemoryCacheSettings-
+        # Repository that starts EMPTY per process -- there is NO persisted
+        # settings file cache), so `migrate` sees the just-written row and runs
+        # the new extension's migrations this same boot. cache-clear (last) clears
+        # the formatter/translation caches so the new extension takes effect.
+        - name: enable-extensions
+          image: {{ include "flarum.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Mirror DatabaseSettingsRepository::set() (SELECT then
+              # update-or-insert) rather than relying on an ON CONFLICT target.
+              # Union desired IDs into extensions_enabled; write only if changed.
+              php -r '
+                $dsn = sprintf("pgsql:host=%s;port=%s;dbname=%s",
+                  getenv("FLARUM_DB_HOST"), getenv("FLARUM_DB_PORT"), getenv("FLARUM_DB_NAME"));
+                $desired = array_values(array_filter(array_map("trim",
+                  explode(",", (string) getenv("DESIRED_EXTENSIONS")))));
+                if (!$desired) { fwrite(STDERR, "No desired extensions; nothing to do.\n"); exit(0); }
+                try {
+                  $pdo = new PDO($dsn, getenv("FLARUM_DB_USER"), getenv("FLARUM_DB_PASSWORD"),
+                    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+                } catch (Throwable $e) {
+                  fwrite(STDERR, "DB not reachable; skipping extension reconcile: " . $e->getMessage() . "\n");
+                  exit(0);
+                }
+                $prefix = (string) getenv("FLARUM_DB_PREFIX");
+                $table  = $prefix . "settings";
+                $key    = "extensions_enabled";
+                try {
+                  // Forum not installed yet -> settings table/row absent: skip.
+                  $sel = $pdo->prepare("SELECT value FROM " . $table . " WHERE key = ?");
+                  $sel->execute([$key]);
+                  $row = $sel->fetch(PDO::FETCH_ASSOC);
+                } catch (Throwable $e) {
+                  fwrite(STDERR, "settings table not ready; skipping reconcile: " . $e->getMessage() . "\n");
+                  exit(0);
+                }
+                $current = [];
+                $rowExists = ($row !== false);
+                if ($rowExists && $row["value"] !== null && $row["value"] !== "") {
+                  $decoded = json_decode($row["value"], true);
+                  if (is_array($decoded)) { $current = $decoded; }
+                }
+                // Union: keep existing order, append only genuinely-new IDs.
+                $merged = $current;
+                foreach ($desired as $id) {
+                  if (!in_array($id, $merged, true)) { $merged[] = $id; }
+                }
+                // Compare as sets -> no-op when nothing new.
+                $a = $current; $b = $merged; sort($a); sort($b);
+                if ($a === $b) {
+                  echo "extensions_enabled already a superset of desired; no change.\n";
+                  exit(0);
+                }
+                $value = json_encode(array_values($merged));
+                if ($rowExists) {
+                  $upd = $pdo->prepare("UPDATE " . $table . " SET value = ? WHERE key = ?");
+                  $upd->execute([$value, $key]);
+                } else {
+                  $ins = $pdo->prepare("INSERT INTO " . $table . " (key, value) VALUES (?, ?)");
+                  $ins->execute([$key, $value]);
+                }
+                echo "extensions_enabled updated -> " . $value . "\n";
+              '
+          env:
+            - name: FLARUM_DB_HOST
+              value: {{ .Values.flarum.database.host | quote }}
+            - name: FLARUM_DB_PORT
+              value: {{ .Values.flarum.database.port | quote }}
+            - name: FLARUM_DB_NAME
+              value: {{ .Values.flarum.database.name | quote }}
+            - name: FLARUM_DB_USER
+              value: {{ .Values.flarum.database.username | quote }}
+            - name: FLARUM_DB_PREFIX
+              value: {{ .Values.flarum.database.prefix | quote }}
+            - name: FLARUM_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "flarum.secretName" .) .Values.flarum.database.existingSecret }}
+                  key: {{ if .Values.flarum.database.existingSecret }}{{ .Values.flarum.database.secretKey }}{{ else }}db-password{{ end }}
+            # Desired enabled-extension IDs (comma-separated). Same source of
+            # truth as the install file's `extensions` key (see the
+            # flarum.desiredExtensions helper): flarum.extensions plus fof-upload
+            # when upload.enabled.
+            - name: DESIRED_EXTENSIONS
+              value: {{ include "flarum.desiredExtensions" . | quote }}
+          volumeMounts:
+            - name: config
+              mountPath: {{ include "flarum.configDir" . }}
+            - name: storage
+              mountPath: /app/storage
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
         # ---- Migrate (idempotent, every boot) ----
         # Safe to run on every boot; catches new core/extension migrations on
         # image upgrades. Only meaningful after install has written config.php.
@@ -311,6 +441,44 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
+          {{- if .Values.flarum.upload.enabled }}
+          # ---- fof/upload S3/CDN env (read at RUNTIME by the web process) ----
+          # fof/upload's Driver/Config::shouldUseEnv() activates ENV mode when
+          # bucket+region (+ key/secret) are present and builds the S3 client from
+          # these. Adapter ROUTING is via the `fof-upload.mimeTypes` settings row
+          # (seeded at install; see secret.yaml). Empty-valued ACL/CUSTOM_URL are
+          # omitted entirely (no x-amz-acl -> R2-safe).
+          env:
+            - name: FOF_UPLOAD_AWS_S3_ENDPOINT
+              value: {{ .Values.flarum.upload.endpoint | quote }}
+            - name: FOF_UPLOAD_AWS_S3_REGION
+              value: {{ .Values.flarum.upload.region | quote }}
+            - name: FOF_UPLOAD_AWS_S3_BUCKET
+              value: {{ .Values.flarum.upload.bucket | quote }}
+            - name: FOF_UPLOAD_AWS_S3_PATH_STYLE_ENDPOINT
+              value: {{ .Values.flarum.upload.pathStyle | quote }}
+            {{- if .Values.flarum.upload.acl }}
+            - name: FOF_UPLOAD_AWS_S3_ACL
+              value: {{ .Values.flarum.upload.acl | quote }}
+            {{- end }}
+            {{- if .Values.flarum.upload.cdnUrl }}
+            # CUSTOM_URL has the highest precedence in fof/upload's public-URL
+            # resolution -- this is the URL browsers fetch uploads from (CDN /
+            # R2 custom domain / public MinIO ingress).
+            - name: FOF_UPLOAD_AWS_S3_CUSTOM_URL
+              value: {{ .Values.flarum.upload.cdnUrl | quote }}
+            {{- end }}
+            - name: FOF_UPLOAD_AWS_S3_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "flarum.upload.existingSecret is required when upload.enabled" .Values.flarum.upload.existingSecret }}
+                  key: {{ .Values.flarum.upload.accessKeyKey }}
+            - name: FOF_UPLOAD_AWS_S3_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "flarum.upload.existingSecret is required when upload.enabled" .Values.flarum.upload.existingSecret }}
+                  key: {{ .Values.flarum.upload.secretKeyKey }}
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: {{ include "flarum.configDir" . }}
