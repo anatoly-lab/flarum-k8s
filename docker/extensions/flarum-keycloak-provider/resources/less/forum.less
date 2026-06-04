@@ -1,0 +1,19 @@
+// SSO-only login UI.
+//
+// Hide the local username/password login form so the LogInModal offers ONLY the
+// Keycloak (OAuth) button. The fof/oauth buttons render in <LogInButtons>, a
+// sibling element OUTSIDE `.LogInModal .Form`, so they remain visible.
+//
+// This is a UI-only measure: the backend POST /login password endpoint stays
+// active on purpose, as an emergency admin escape hatch in case Keycloak is
+// unavailable. Combined with allow_sign_up=0 (no local registration) this gives
+// a clean SSO-only experience without risking a full lockout.
+.LogInModal .Form {
+  display: none;
+}
+
+// Footer affordances that only make sense for local accounts.
+.LogInModal-forgotPassword,
+.LogInModal-signUp {
+  display: none;
+}

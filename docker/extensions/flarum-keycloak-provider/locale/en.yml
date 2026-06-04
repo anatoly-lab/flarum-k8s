@@ -1,8 +1,28 @@
 fof-oauth:
+  lib:
+    providers:
+      # Provider label shown in the admin OAuth settings provider row.
+      keycloak: Keycloak
+
   forum:
+    providers:
+      # Provider display name. Interpolated as {provider} into the login button
+      # and shown in the "Account linked" modal / linked-accounts list. This is
+      # the raw key that appears without a translation.
+      keycloak: Keycloak
+
     log_in:
       # fof/oauth builds the button label key as `with_{name}_button` where
-      # {name} is this provider's name() ("keycloak"). Built-in providers alias
-      # this to `with_button` ("Log In with {provider}"); we set a literal label
-      # so it renders cleanly without depending on {provider} resolution.
+      # {name} is this provider's name() ("keycloak").
       with_keycloak_button: Log In with Keycloak
+
+  admin:
+    settings:
+      providers:
+        keycloak:
+          description: "Keycloak OIDC client. In Keycloak create a confidential client with redirect URI <forum-url>/auth/keycloak."
+          # One label per KeycloakProvider::fields() key.
+          client_id_label: Client ID
+          client_secret_label: Client Secret
+          auth_server_url_label: Auth Server URL (no trailing /auth)
+          realm_label: Realm

@@ -10,11 +10,14 @@
  */
 
 use AnatolyLab\FlarumKeycloak\KeycloakProvider;
+use Flarum\Extend\Frontend;
 use Flarum\Extend\Locales;
 use FoF\OAuth\Extend\RegisterProvider;
 
 return [
     new RegisterProvider(KeycloakProvider::class),
-    // Provides the SSO button label (fof-oauth.forum.log_in.with_keycloak_button).
+    // Provides the SSO button label + provider display name + admin field labels.
     new Locales(__DIR__ . '/locale'),
+    // SSO-only: hide the local username/password login form (Keycloak button kept).
+    (new Frontend('forum'))->css(__DIR__ . '/resources/less/forum.less'),
 ];
